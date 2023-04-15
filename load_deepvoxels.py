@@ -106,5 +106,3 @@ def load_dv_data(scene='cube', basedir='/data/deepvoxels', testskip=8):
     print(poses.shape, imgs.shape)
     
     return imgs, poses, render_poses, [H,W,focal], i_split
-
-

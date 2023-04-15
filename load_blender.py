@@ -1,32 +1,31 @@
 import os
-import tensorflow as tf
+import torch
 import numpy as np
 import imageio 
 import json
+import torchvision.transforms as T
 
 
-
-
-trans_t = lambda t : tf.convert_to_tensor([
+trans_t = lambda t : torch.as_tensor([
     [1,0,0,0],
     [0,1,0,0],
     [0,0,1,t],
     [0,0,0,1],
-], dtype=tf.float32)
+], dtype=torch.float32)
 
-rot_phi = lambda phi : tf.convert_to_tensor([
+rot_phi = lambda phi : torch.as_tensor([
     [1,0,0,0],
-    [0,tf.cos(phi),-tf.sin(phi),0],
-    [0,tf.sin(phi), tf.cos(phi),0],
+    [0,torch.cos(phi),-torch.sin(phi),0],
+    [0,torch.sin(phi), torch.cos(phi),0],
     [0,0,0,1],
-], dtype=tf.float32)
+], dtype=torch.float32)
 
-rot_theta = lambda th : tf.convert_to_tensor([
-    [tf.cos(th),0,-tf.sin(th),0],
+rot_theta = lambda th : torch.as_tensor([
+    [torch.cos(th),0,-torch.sin(th),0],
     [0,1,0,0],
-    [tf.sin(th),0, tf.cos(th),0],
+    [torch.sin(th),0, torch.cos(th),0],
     [0,0,0,1],
-], dtype=tf.float32)
+], dtype=torch.float32)
 
 
 def pose_spherical(theta, phi, radius):
@@ -76,14 +75,12 @@ def load_blender_data(basedir, half_res=False, testskip=1):
     camera_angle_x = float(meta['camera_angle_x'])
     focal = .5 * W / np.tan(.5 * camera_angle_x)
     
-    render_poses = tf.stack([pose_spherical(angle, -30.0, 4.0) for angle in np.linspace(-180,180,40+1)[:-1]],0)
+    render_poses = torch.stack([pose_spherical(angle, -30.0, 4.0) for angle in np.linspace(-180,180,40+1)[:-1]],0)
     
     if half_res:
-        imgs = tf.image.resize_area(imgs, [400, 400]).numpy()
+        imgs = T.resize(size = [400, 400])(imgs).numpy()
         H = H//2
         W = W//2
         focal = focal/2.
         
     return imgs, poses, render_poses, [H, W, focal], i_split
-
-

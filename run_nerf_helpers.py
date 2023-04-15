@@ -1,17 +1,21 @@
+# Misc utils
+
 import os
 import sys
-import tensorflow as tf
+import torch
+import torch.nn as nn
 import numpy as np
 import imageio
 import json
+from typing import Optional, Tuple
 
 
 # Misc utils
 
-def img2mse(x, y): return tf.reduce_mean(tf.square(x - y))
+def img2mse(x, y): return torch.mean(torch.square(x - y))
 
 
-def mse2psnr(x): return -10.*tf.log(x)/tf.log(10.)
+def mse2psnr(x): return -10.*torch.log(x)/torch.log(10.)
 
 
 def to8b(x): return (255*np.clip(x, 0, 1)).astype(np.uint8)
@@ -39,9 +43,9 @@ class Embedder:
         N_freqs = self.kwargs['num_freqs']
 
         if self.kwargs['log_sampling']:
-            freq_bands = 2.**tf.linspace(0., max_freq, N_freqs)
+            freq_bands = 2.**torch.linspace(0., max_freq, N_freqs)
         else:
-            freq_bands = tf.linspace(2.**0., 2.**max_freq, N_freqs)
+            freq_bands = torch.linspace(2.**0., 2.**max_freq, N_freqs)
 
         for freq in freq_bands:
             for p_fn in self.kwargs['periodic_fns']:
@@ -53,13 +57,13 @@ class Embedder:
         self.out_dim = out_dim
 
     def embed(self, inputs):
-        return tf.concat([fn(inputs) for fn in self.embed_fns], -1)
+        return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
 
 
 def get_embedder(multires, i=0):
 
     if i == -1:
-        return tf.identity, 3
+        return nn.Identity(), 3
 
     embed_kwargs = {
         'include_input': True,
@@ -67,7 +71,7 @@ def get_embedder(multires, i=0):
         'max_freq_log2': multires-1,
         'num_freqs': multires,
         'log_sampling': True,
-        'periodic_fns': [tf.math.sin, tf.math.cos],
+        'periodic_fns': [torch.sin, torch.cos],
     }
 
     embedder_obj = Embedder(**embed_kwargs)
@@ -75,8 +79,8 @@ def get_embedder(multires, i=0):
     return embed, embedder_obj.out_dim
 
 
+'''
 # Model architecture
-
 def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
 
     relu = tf.keras.layers.ReLU()
@@ -117,16 +121,94 @@ def init_nerf_model(D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     return model
 
+'''
+
+
+# Model architecture
+class NeRF(nn.Module):
+  r"""
+  Neural radiance fields module.
+  """
+  def __init__(
+    self,
+    d_input: int = 3,
+    n_layers: int = 8,
+    d_filter: int = 256,
+    skip: Tuple[int] = (4,),
+    d_viewdirs: Optional[int] = None
+  ):
+    super().__init__()
+    self.d_input = d_input
+    self.skip = skip
+    self.act = nn.functional.relu
+    self.d_viewdirs = d_viewdirs
+
+    # Create model layers
+    self.layers = nn.ModuleList(
+      [nn.Linear(self.d_input, d_filter)] +
+      [nn.Linear(d_filter + self.d_input, d_filter) if i in skip \
+       else nn.Linear(d_filter, d_filter) for i in range(n_layers - 1)]
+    )
+
+    # Bottleneck layers
+    if self.d_viewdirs is not None:
+      # If using viewdirs, split alpha and RGB
+      self.alpha_out = nn.Linear(d_filter, 1)
+      self.rgb_filters = nn.Linear(d_filter, d_filter)
+      self.branch = nn.Linear(d_filter + self.d_viewdirs, d_filter // 2)
+      self.output = nn.Linear(d_filter // 2, 3)
+    else:
+      # If no viewdirs, use simpler output
+      self.output = nn.Linear(d_filter, 4)
+  
+  def forward(
+    self,
+    x: torch.Tensor,
+    viewdirs: Optional[torch.Tensor] = None
+  ) -> torch.Tensor:
+    r"""
+    Forward pass with optional view direction.
+    """
+
+    # Cannot use viewdirs if instantiated with d_viewdirs = None
+    if self.d_viewdirs is None and viewdirs is not None:
+      raise ValueError('Cannot input x_direction if d_viewdirs was not given.')
+
+    # Apply forward pass up to bottleneck
+    x_input = x
+    for i, layer in enumerate(self.layers):
+      x = self.act(layer(x))
+      if i in self.skip:
+        x = torch.cat([x, x_input], dim=-1)
+
+    # Apply bottleneck
+    if self.d_viewdirs is not None:
+      # Split alpha from network output
+      alpha = self.alpha_out(x)
+
+      # Pass through bottleneck to get RGB
+      x = self.rgb_filters(x)
+      x = torch.concat([x, viewdirs], dim=-1)
+      x = self.act(self.branch(x))
+      x = self.output(x)
+
+      # Concatenate alphas to output
+      x = torch.concat([x, alpha], dim=-1)
+    else:
+      # Simple output
+      x = self.output(x)
+    return x
+
 
 # Ray helpers
 
 def get_rays(H, W, focal, c2w):
     """Get ray origins, directions from a pinhole camera."""
-    i, j = tf.meshgrid(tf.range(W, dtype=tf.float32),
-                       tf.range(H, dtype=tf.float32), indexing='xy')
-    dirs = tf.stack([(i-W*.5)/focal, -(j-H*.5)/focal, -tf.ones_like(i)], -1)
-    rays_d = tf.reduce_sum(dirs[..., np.newaxis, :] * c2w[:3, :3], -1)
-    rays_o = tf.broadcast_to(c2w[:3, -1], tf.shape(rays_d))
+    i, j = torch.meshgrid(torch.range(W, dtype=torch.float32),
+                       torch.range(H, dtype=torch.float32), indexing='xy')
+    dirs = torch.stack([(i-W*.5)/focal, -(j-H*.5)/focal, -torch.ones_like(i)], -1)
+    rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3, :3], -1)
+    rays_o = torch.broadcast_to(c2w[:3, -1], rays_d.shape)
     return rays_o, rays_d
 
 
@@ -172,8 +254,8 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
         (rays_d[..., 1]/rays_d[..., 2] - rays_o[..., 1]/rays_o[..., 2])
     d2 = -2. * near / rays_o[..., 2]
 
-    rays_o = tf.stack([o0, o1, o2], -1)
-    rays_d = tf.stack([d0, d1, d2], -1)
+    rays_o = torch.stack([o0, o1, o2], -1)
+    rays_d = torch.stack([d0, d1, d2], -1)
 
     return rays_o, rays_d
 
@@ -184,27 +266,27 @@ def sample_pdf(bins, weights, N_samples, det=False):
 
     # Get pdf
     weights += 1e-5  # prevent nans
-    pdf = weights / tf.reduce_sum(weights, -1, keepdims=True)
-    cdf = tf.cumsum(pdf, -1)
-    cdf = tf.concat([tf.zeros_like(cdf[..., :1]), cdf], -1)
+    pdf = weights / torch.sum(weights, -1, keepdims=True)
+    cdf = torch.cumsum(pdf, -1)
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)
 
     # Take uniform samples
     if det:
-        u = tf.linspace(0., 1., N_samples)
-        u = tf.broadcast_to(u, list(cdf.shape[:-1]) + [N_samples])
+        u = torch.linspace(0., 1., N_samples)
+        u = torch.broadcast_to(u, list(cdf.shape[:-1]) + [N_samples])
     else:
-        u = tf.random.uniform(list(cdf.shape[:-1]) + [N_samples])
+        u = torch.rand(list(cdf.shape[:-1]) + [N_samples])
 
     # Invert CDF
-    inds = tf.searchsorted(cdf, u, side='right')
-    below = tf.maximum(0, inds-1)
-    above = tf.minimum(cdf.shape[-1]-1, inds)
-    inds_g = tf.stack([below, above], -1)
-    cdf_g = tf.gather(cdf, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
-    bins_g = tf.gather(bins, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+    inds = torch.searchsorted(cdf, u, side='right')
+    below = torch.maximum(0, inds-1)
+    above = torch.minimum(cdf.shape[-1]-1, inds)
+    inds_g = torch.stack([below, above], -1)
+    cdf_g = torch.gather(cdf, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+    bins_g = torch.gather(bins, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
 
     denom = (cdf_g[..., 1]-cdf_g[..., 0])
-    denom = tf.where(denom < 1e-5, tf.ones_like(denom), denom)
+    denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
     t = (u-cdf_g[..., 0])/denom
     samples = bins_g[..., 0] + t * (bins_g[..., 1]-bins_g[..., 0])
 
